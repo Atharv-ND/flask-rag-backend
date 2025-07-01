@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 import os
 import re
-from functools import lru_cache
 
 from langchain.schema import Document
 from langchain_community.vectorstores import FAISS
@@ -25,26 +24,21 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["Healthcare"]
 collection = db["symptom"]
 
-# --- FAISS loading optimized ---
-@lru_cache(maxsize=1)
-def get_vector_store():
-    # Load fewer documents from MongoDB to reduce memory
-    kb_records = list(collection.find({}).limit(20))  # 🔽 LIMIT to 20
-    documents = [
-        Document(page_content=rec["content"], metadata={"title": rec["department"]})
-        for rec in kb_records
-    ]
-
-    # Use a smaller, more memory-efficient embedding model
-    embedding_model = HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')  # 🔽 lighter model
-
-    return FAISS.from_documents(documents, embedding_model)
-
-def retrieve_context(symptom_query: str, k=3):
-    vector_store = get_vector_store()
-    return vector_store.similarity_search(symptom_query, k=k)
+# --- Load vector store once at startup ---
+print("🔧 Loading FAISS vector store...")
+kb_records = list(collection.find({}).limit(20))  # 🔽 LIMIT to 20 records
+documents = [
+    Document(page_content=rec["content"], metadata={"title": rec["department"]})
+    for rec in kb_records
+]
+embedding_model = HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')  # 🔽 lighter model
+vector_store = FAISS.from_documents(documents, embedding_model)
+print("✅ Vector store ready.")
 
 # --- RAG logic ---
+def retrieve_context(symptom_query: str, k=3):
+    return vector_store.similarity_search(symptom_query, k=k)
+
 def generate_response(symptoms: str, age: int, gender: str):
     age_group = "Young" if age < 20 else "Adult" if age < 60 else "Elderly"
     profile = f"{age_group} {gender.capitalize()}"
