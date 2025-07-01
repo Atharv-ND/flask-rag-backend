@@ -28,9 +28,16 @@ collection = db["symptom"]
 # --- FAISS loading optimized ---
 @lru_cache(maxsize=1)
 def get_vector_store():
-    kb_records = list(collection.find({}))
-    documents = [Document(page_content=rec["content"], metadata={"title": rec["department"]}) for rec in kb_records]
-    embedding_model = HuggingFaceEmbeddings(model_name='sentence-transformers/all-mpnet-base-v2')
+    # Load fewer documents from MongoDB to reduce memory
+    kb_records = list(collection.find({}).limit(20))  # 🔽 LIMIT to 20
+    documents = [
+        Document(page_content=rec["content"], metadata={"title": rec["department"]})
+        for rec in kb_records
+    ]
+
+    # Use a smaller, more memory-efficient embedding model
+    embedding_model = HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')  # 🔽 lighter model
+
     return FAISS.from_documents(documents, embedding_model)
 
 def retrieve_context(symptom_query: str, k=3):
