@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 import os
 import re
+from functools import lru_cache
 
 from langchain.schema import Document
 from langchain_community.vectorstores import FAISS
@@ -24,21 +25,27 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["Healthcare"]
 collection = db["symptom"]
 
-# --- Load vector store once at startup ---
-print("🔧 Loading FAISS vector store...")
-kb_records = list(collection.find({}).limit(20))  # 🔽 LIMIT to 20 records
-documents = [
-    Document(page_content=rec["content"], metadata={"title": rec["department"]})
-    for rec in kb_records
-]
-embedding_model = HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')  # 🔽 lighter model
-vector_store = FAISS.from_documents(documents, embedding_model)
-print("✅ Vector store ready.")
+# --- FAISS loading optimized ---
+@lru_cache(maxsize=1)
+def get_vector_store():
+    # ✅ Load ALL documents from MongoDB
+    kb_records = list(collection.find({}))  # ← Removed .limit(20)
+    
+    documents = [
+        Document(page_content=rec["content"], metadata={"title": rec["department"]})
+        for rec in kb_records
+    ]
 
-# --- RAG logic ---
+    # ✅ You can continue using the efficient embedding model
+    embedding_model = HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')
+
+    return FAISS.from_documents(documents, embedding_model)
+
 def retrieve_context(symptom_query: str, k=3):
+    vector_store = get_vector_store()
     return vector_store.similarity_search(symptom_query, k=k)
 
+# --- RAG logic ---
 def generate_response(symptoms: str, age: int, gender: str):
     age_group = "Young" if age < 20 else "Adult" if age < 60 else "Elderly"
     profile = f"{age_group} {gender.capitalize()}"
@@ -54,12 +61,32 @@ def generate_response(symptoms: str, age: int, gender: str):
     context = "\n\n".join([f"{doc.metadata['title']}:\n{doc.page_content}" for doc in retrieved_docs])
 
     prompt = f"""
-Patient's Symptoms: "{symptoms}"
-Age and Gender: {profile}
-Refer only to the following knowledge base:
+You are a medical assistant AI helping a patient who described the following symptoms: "{symptoms}"
+Patient Profile: {profile}
+
+ONLY use the medical information provided below to generate your response:
 {context}
-...
-    """
+
+⚠️ VERY IMPORTANT:
+- Do not mention "context", "documents", "knowledge base", or anything technical.
+- Do not say things like "Based on the context" or "According to the retrieved information".
+- Speak as if you are a doctor explaining directly to a patient.
+
+Instructions:
+1. Identify the department based on symptoms.
+2. Give a brief explanation in plain, patient-friendly language.
+3. List the treatment options extracted only from the provided information.
+
+Format your output like this :
+Department: <department name>
+Explanation: <simple reason in plain language>
+Treatment:
+- bullet point
+- bullet point
+"""
+
+
+
     response = model.generate_content(prompt, generation_config={"temperature": 0.3})
     output = response.text.strip()
 
@@ -78,13 +105,17 @@ Refer only to the following knowledge base:
         for dept, explanation, treatment_block in matches:
             departments.append(dept.strip())
             explanations.append(explanation.strip())
+
+            # Clean and filter treatment lines (remove empty ones)
             treatments = "\n".join([
                 f"- {line.strip('- ').strip()}"
                 for line in treatment_block.strip().splitlines()
-                if line.strip().startswith("-")
+                if line.strip().startswith("-") and line.strip("- ").strip()  # ✅ Remove blank lines
             ])
+
             treatment_section = f"\nDepartment: {dept.strip()}\n{treatments}"
             treatment_blocks.append(treatment_section)
+
 
         return {
             "department": ", ".join(departments),
